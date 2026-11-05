@@ -1,0 +1,49 @@
+name: Autoteste do backup (sem produção)
+
+# Valida todo o ciclo backup → apagar → restaurar → verificar → login, usando um Supabase
+# temporário com o FAV Assist instalado a partir do repositório público. Não usa dados reais.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '43 7 1 * *' # mensal: detecta mudanças no Supabase CLI/Postgres antes que afetem a produção
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  selftest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: odesignerfelipe/favassist
+          path: fav
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: fav/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile
+        working-directory: fav
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 3.0.0
+      - run: FAV_REPO="$GITHUB_WORKSPACE/fav" scripts/selftest.sh
+
+  alerta:
+    needs: selftest
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "⚠️ Autoteste do backup falhou — $(date -u +%d/%m/%Y)" \
+            --body "Execução: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

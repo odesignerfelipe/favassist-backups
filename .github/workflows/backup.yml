@@ -1,0 +1,104 @@
+name: Backup do banco (produção)
+
+# Diário às 03:17 (Brasília). Só roda no agendamento quando a variável do repositório
+# BACKUP_ENABLED = true (ativação depende de autorização). Execução manual sempre disponível.
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      testar_restauracao:
+        description: 'Testar a restauração deste backup em um Supabase temporário'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: backup
+  cancel-in-progress: false
+
+env:
+  SUPABASE_CLI_VERSION: 3.0.0
+
+jobs:
+  backup:
+    if: github.event_name == 'workflow_dispatch' || vars.BACKUP_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      artifact: ${{ steps.meta.outputs.artifact }}
+      weekly: ${{ steps.meta.outputs.weekly }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+      - name: Gerar backup criptografado
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: scripts/backup.sh out
+      - id: meta
+        run: |
+          echo "artifact=$(basename out/*.tar.gz.gpg .tar.gz.gpg)" >> "$GITHUB_OUTPUT"
+          echo "weekly=$([ "$(date -u +%u)" = 7 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Guardar cópia diária (30 dias)
+        uses: actions/upload-artifact@v4
+        with:
+          name: diario-${{ steps.meta.outputs.artifact }}
+          path: out/
+          retention-days: 30
+          compression-level: 0
+          if-no-files-found: error
+      - name: Guardar cópia semanal (90 dias, aos domingos)
+        if: steps.meta.outputs.weekly == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: semanal-${{ steps.meta.outputs.artifact }}
+          path: out/
+          retention-days: 90
+          compression-level: 0
+          if-no-files-found: error
+
+  restore-test:
+    needs: backup
+    # Semanal (domingo) no agendamento; na execução manual, quando pedido
+    if: needs.backup.outputs.weekly == 'true' || (github.event_name == 'workflow_dispatch' && inputs.testar_restauracao)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: diario-${{ needs.backup.outputs.artifact }}
+          path: in
+      - name: Subir Supabase temporário (vazio)
+        run: supabase start -x realtime,imgproxy,mailpit,studio,edge-runtime,logflare,vector,supavisor,postgres-meta,postgrest
+      - name: Restaurar e verificar
+        env:
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          export TARGET_DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
+          scripts/restore.sh in/*.tar.gz.gpg
+      - name: Apagar o Supabase temporário
+        if: always()
+        run: supabase stop --no-backup || true
+
+  alerta:
+    needs: [backup, restore-test]
+    if: failure()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Abrir alerta (issue) — o GitHub avisa por e-mail
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "⚠️ Falha no backup do FAV Assist — $(date -u +%d/%m/%Y)" \
+            --body "A execução ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} falhou. Verifique os logs (o Supabase pode estar pausado ou a senha do banco pode ter mudado)."

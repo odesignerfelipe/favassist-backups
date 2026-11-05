@@ -1,0 +1,14 @@
+# Nunca versionar backups, dumps em claro ou credenciais
+out/
+in/
+*.gpg
+*.sql.gz
+*.tar.gz
+*.dump
+.env
+.env.*
+supabase/.temp/
+supabase/.branches/
+# scripts/*.sql são consultas, não dados
+*.sql
+!scripts/*.sql
