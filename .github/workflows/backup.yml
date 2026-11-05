@@ -32,6 +32,14 @@ jobs:
       artifact: ${{ steps.meta.outputs.artifact }}
       weekly: ${{ steps.meta.outputs.weekly }}
     steps:
+      - name: Trava de segurança — repositório precisa ser privado
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" != "true" ]; then
+            echo "::error::Repositório público: backup cancelado. Torne o repositório privado (Settings → General → Danger Zone)."
+            exit 1
+          fi
       - uses: actions/checkout@v4
       - uses: supabase/setup-cli@v1
         with:
